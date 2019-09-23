@@ -12,7 +12,11 @@ else
 	DEBFLAGS = -O2
 endif
 
-ccflags-y += -DFOO_MODULE_NAME=\"Foo\" -DFOO_DEV_LOOPBACK $(DEBFLAGS)
+ccflags-y += -DFOO_MODULE_NAME=\"Foo\" \
+-DFOO_DEV_LOOPBACK \
+-DFOO_DEV_SINGLE_OPEN \
+-DFOO_DEV_EXCLUSIVE_OPEN \
+$(DEBFLAGS)
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 BUILD_DIR ?= $(PWD)/build

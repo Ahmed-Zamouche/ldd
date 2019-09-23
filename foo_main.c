@@ -58,6 +58,10 @@ typedef struct foo_dev_s {
 
   size_t open_count;
 
+#ifdef FOO_DEV_SINGLE_OPEN
+  atomic_t is_available;
+#endif
+
   uint8_t *rd_buffer;
   uint8_t *wr_buffer;
 
@@ -98,6 +102,8 @@ static struct file_operations s_foo_fops = {.owner = THIS_MODULE,
 /**/
 static loff_t foo_llseek(struct file *file, loff_t offset, int whence) {
 
+  loff_t newpos;
+
   foo_dev_t *foo_dev = file->private_data;
   (void)foo_dev;
 
@@ -105,7 +111,20 @@ static loff_t foo_llseek(struct file *file, loff_t offset, int whence) {
          "%s device pid=%d llseek(file=%p, offset=%llx, whence=%x)\n",
          FOO_DEV_NAME, current->pid, file, offset, whence);
 
-  return 0;
+  switch (whence) {
+  case SEEK_SET:
+  case SEEK_CUR:
+  case SEEK_END:
+  case SEEK_DATA:
+  case SEEK_HOLE:
+    newpos = -ESPIPE;
+    break;
+  default:
+    newpos = -EINVAL;
+    break;
+  }
+
+  return newpos;
 }
 
 /* When a process reads from our device, this gets called. */
@@ -418,15 +437,26 @@ static int foo_open(struct inode *inode, struct file *file) {
 
   file->private_data = foo_dev;
 
+  (void)nonseekable_open(inode, file);
+
+#ifdef FOO_DEV_SINGLE_OPEN
+  if (!atomic_dec_and_test(&foo_dev->is_available)) {
+    atomic_inc(&foo_dev->is_available);
+    return -EBUSY; /* already open */
+  }
+#endif
+
   if (mutex_lock_interruptible(&foo_dev->mutex)) {
     return -ERESTARTSYS;
   }
 
+#if 0 // TODO:remove me
   /* If device is open, return -EBUSY */
   if (foo_dev->open_count && false) {
     mutex_unlock(&foo_dev->mutex);
     return -EBUSY;
   }
+#endif
 
   foo_dev->open_count++;
   mutex_unlock(&foo_dev->mutex);
@@ -444,6 +474,10 @@ static int foo_release(struct inode *inode, struct file *file) {
   // int index = iminor(inode);
   foo_dev_t *foo_dev; /* device information */
   foo_dev = container_of(inode->i_cdev, foo_dev_t, cdev);
+
+#ifdef FOO_DEV_SINGLE_OPEN
+  atomic_inc(&foo_dev->is_available); /* release the device */
+#endif
 
   printk(KERN_DEBUG "%s device pid=%d release(inode=%p, file=%p)\n",
          FOO_DEV_NAME, current->pid, inode, file);
@@ -533,6 +567,10 @@ static int foo_init_dev(foo_dev_t *foo_dev) {
   init_waitqueue_head(&foo_dev->q_rd);
 
   init_waitqueue_head(&foo_dev->q_wr);
+
+#ifdef FOO_DEV_SINGLE_OPEN
+  atomic_set(&foo_dev->is_available, 1);
+#endif
 
   foo_dev->q_async = NULL;
 
