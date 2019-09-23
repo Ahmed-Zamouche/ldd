@@ -62,6 +62,10 @@ typedef struct foo_dev_s {
   atomic_t is_available;
 #endif
 
+#ifdef FOO_DEV_EXCLUSIVE_OPEN
+  kuid_t uid;
+#endif
+
   uint8_t *rd_buffer;
   uint8_t *wr_buffer;
 
@@ -450,15 +454,22 @@ static int foo_open(struct inode *inode, struct file *file) {
     return -ERESTARTSYS;
   }
 
-#if 0 // TODO:remove me
-  /* If device is open, return -EBUSY */
-  if (foo_dev->open_count && false) {
-    mutex_unlock(&foo_dev->mutex);
-    return -EBUSY;
+#ifdef FOO_DEV_EXCLUSIVE_OPEN
+  if (foo_dev->open_count) {                             /*already opened*/
+    if ((foo_dev->uid.val != current_cred()->uid.val) && /* allow user */
+        (foo_dev->uid.val !=
+         current_cred()->euid.val) && /* allow whoever did su */
+        !capable(CAP_DAC_OVERRIDE)) { /* still allow root */
+      mutex_unlock(&foo_dev->mutex);
+      return -EBUSY; /* -EPERM would confuse the user */
+    }
+  } else {
+    foo_dev->uid.val = current_cred()->uid.val; /* grab it */
   }
 #endif
 
   foo_dev->open_count++;
+
   mutex_unlock(&foo_dev->mutex);
 
   try_module_get(THIS_MODULE);
@@ -485,7 +496,9 @@ static int foo_release(struct inode *inode, struct file *file) {
   if (mutex_lock_interruptible(&foo_dev->mutex)) {
     return -ERESTARTSYS;
   }
+
   foo_dev->open_count--;
+
   mutex_unlock(&foo_dev->mutex);
 
   module_put(THIS_MODULE);
