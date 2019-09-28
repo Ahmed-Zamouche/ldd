@@ -45,9 +45,9 @@ clang-format:
 	clang-format -i foo_main.* utils/ringbuffer.*
 load:
 	# Clear the kernel log without echo
-	sudo dmesg -C
+	#sudo dmesg -C
 	sudo ./foo_load.sh
 unload:
 	# Clear the kernel log without echo
-	sudo dmesg -C
+	#sudo dmesg -C
 	-sudo ./foo_unload.sh

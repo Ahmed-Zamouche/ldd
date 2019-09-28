@@ -602,6 +602,170 @@ static int foo_init_dev(foo_dev_t *foo_dev) {
   return 0;
 }
 
+#include <linux/workqueue.h>
+
+typedef struct foo_taskqueue_s {
+  struct workqueue_struct *workqueue;
+  atomic_t enabled;
+} foo_taskqueue_t;
+
+typedef struct foo_task_s {
+  struct delayed_work dwork;
+  atomic_t data;
+  /**/
+  foo_taskqueue_t *taskqueue;
+} foo_task_t;
+
+static foo_taskqueue_t s_taskqueue;
+static foo_task_t s_task;
+
+static void foo_task_fn(struct work_struct *work) {
+
+  struct delayed_work *dwork;
+  foo_task_t *task;
+
+  dwork = container_of(work, struct delayed_work, work);
+
+  task = container_of(dwork, foo_task_t, dwork);
+
+  printk(KERN_DEBUG
+         "task.data  = %d, in_interrupt = %d, pid: %d, smp_pid: %d, com: %s\n",
+         atomic_read(&task->data), in_interrupt() ? 1 : 0, current->pid,
+         smp_processor_id(), current->comm);
+  atomic_inc(&task->data);
+}
+
+static int foo_task_init(foo_task_t *task, foo_taskqueue_t *taskqueue) {
+
+  INIT_DELAYED_WORK(&task->dwork, foo_task_fn);
+
+  atomic_set(&task->data, 0);
+
+  task->taskqueue = taskqueue;
+
+  return 0;
+}
+
+static bool foo_task_start(foo_task_t *task, unsigned long delay) {
+  bool enabled = false;
+
+  if (atomic_dec_and_test(&task->taskqueue->enabled)) {
+    enabled = true;
+    queue_delayed_work(task->taskqueue->workqueue, &task->dwork, delay);
+  }
+  atomic_inc(&task->taskqueue->enabled);
+  return enabled;
+}
+
+static inline bool foo_task_cancel(foo_task_t *task) {
+  return cancel_delayed_work(&task->dwork);
+}
+
+static int foo_taskqueue_create(foo_taskqueue_t *taskqueue) {
+  // create_workqueue(const char *name);
+  taskqueue->workqueue = create_singlethread_workqueue("foo-workqueue");
+
+  if (!taskqueue->workqueue) {
+    printk(KERN_ERR "Failed to create a queue work\n");
+    return -ENOMEM;
+  }
+
+  atomic_set(&taskqueue->enabled, 1);
+
+  return 0;
+}
+
+static void foo_taskqueue_destroy(foo_taskqueue_t *taskqueue) {
+
+  atomic_set(&taskqueue->enabled, 0);
+
+  /*if (!cancel_delayed_work(dwork)) {
+
+  }*/
+
+  flush_workqueue(taskqueue->workqueue);
+
+  destroy_workqueue(taskqueue->workqueue);
+}
+
+#include <linux/delay.h>
+#include <linux/jiffies.h>
+#include <linux/sched.h>
+#include <linux/timer.h>
+#include <linux/timex.h>
+
+static struct timer_list foo_timer;
+
+void foo_timer_fn(unsigned long arg) {
+
+  printk(KERN_DEBUG
+         "timer.data = %ld, in_interrupt = %d, pid: %d, smp_pid: %d, com: %s\n",
+         arg, in_interrupt() ? 1 : 0, current->pid, smp_processor_id(),
+         current->comm);
+
+  foo_timer.data = arg + 1;
+  foo_timer.expires = jiffies + 10 * HZ; /* parameter */
+
+  add_timer(&foo_timer);
+  foo_task_start(&s_task, 0 * HZ);
+}
+
+int foo_timer_init(struct timer_list *timer) {
+
+  init_timer(timer);
+
+  timer->data = 0;
+  foo_timer.expires = jiffies + 10 * HZ; /* parameter */
+  timer->function = foo_timer_fn;
+
+  /* register the timer */
+
+  add_timer(timer);
+
+  return 0;
+}
+void foo_timer_deinit(struct timer_list *timer) {
+  // del_timer(timer);
+  del_timer_sync(timer);
+}
+
+static void foo_delay(unsigned long ms) {
+  unsigned long timeout = (ms * HZ) / 1000;
+#if 0
+  unsigned long j = jiffies + timeout;
+  while (time_before(jiffies, j)) {
+#if 0    
+    cpu_relax();
+#else
+    schedule();
+#endif
+  }
+#else
+  set_current_state(TASK_INTERRUPTIBLE);
+  schedule_timeout(timeout);
+#endif
+}
+
+static void foo_jiffies(void) {
+
+  unsigned long j = 1000;
+  unsigned long start, end;
+  long overhead;
+
+  start = get_cycles();
+  end = get_cycles();
+
+  overhead = end - start;
+  printk(KERN_DEBUG "get_cycles overhead: %li\n", overhead);
+
+  start = get_cycles();
+  foo_delay(j); /* read the current value */
+  end = get_cycles();
+
+  printk(KERN_DEBUG "delay(%ld ms) time lapse: %li\n", j,
+         (end - start) - overhead);
+}
+
 static int __init foo_init(void) {
 
   int err = 0;
@@ -609,6 +773,13 @@ static int __init foo_init(void) {
 
   printk(KERN_INFO "Initializing %s kernel-%s module\n", FOO_MOD_NAME,
          UTS_RELEASE);
+
+  foo_jiffies();
+
+  foo_timer_init(&foo_timer);
+
+  foo_taskqueue_create(&s_taskqueue);
+  foo_task_init(&s_task, &s_taskqueue);
 
   SET_MODULE_OWNER(&s_foo_fops);
 
@@ -661,6 +832,12 @@ static void __exit foo_exit(void) {
   /* Remember — we have to clean up after ourselves. Unregister the character
    * device. */
   printk(KERN_INFO "Exiting %s kernel-%s module\n", FOO_MOD_NAME, UTS_RELEASE);
+
+  foo_timer_deinit(&foo_timer);
+
+  foo_task_cancel(&s_task);
+
+  foo_taskqueue_destroy(&s_taskqueue);
 
   for (i = 0; i < ARRAY_SIZE(foo_dev); i++) {
     //@warning: deinittialation order matter
